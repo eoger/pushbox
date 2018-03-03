@@ -3,17 +3,17 @@
 ## packaging
 Images must stay less than about 200K. You should aggressively exclude
 anything that is not absolutely necessary. Only directories and explicit
-full file paths can be excluded. 
+full file paths can be excluded.
 
 ## domain-manager
 
 Unfortunately, there are a number of bugs with domain-manager.
 
-1) It will look for the first certificate for a given domain match, 
-ths may result in it pulling an expired (or soon to be expired) cert from 
+1) It will look for the first certificate for a given domain match,
+ths may result in it pulling an expired (or soon to be expired) cert from
 the certificate manager. Apparently, you can't specify an ARN for a valid
 certificate.
-2) The cert MUST be in the region that you're deploying to. 
+2) The cert MUST be in the region that you're deploying to.
 
 
 ## Post deploy steps
@@ -26,9 +26,9 @@ want to [verify the cert identifier from ACM](https://console.aws.amazon.com/acm
     * Leave **Path** empty
     * Set **Destination** to `dev-pushbox...`.
     * Set the Stage to `dev`
-    
+
 * Click ***Save***
-* COpy the **Target Domain Name** to your clipboard.
+* Copy the **Target Domain Name** to your clipboard.
 
 * Go to the [Route 53 panel](https://console.aws.amazon.com/route53/home#resource-record-sets:Z3GEB01DYXZM0A)
 * Click ***Create Record Set***
