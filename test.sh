@@ -1,6 +1,6 @@
 #! /bin/bash
 set -e
-#FXA_HOST=oauth-pushbox2.dev.lcip.org
+FXA_HOST=oauth-pushbox2.dev.lcip.org
 #HOST=https://pushbox.dev.lcip.org
 HOST=https://pushbox.dev.mozaws.net
 #HOST=https://3ksqxftunj.execute-api.us-east-1.amazonaws.com/dev

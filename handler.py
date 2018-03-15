@@ -52,6 +52,7 @@ def log_exceptions(f):
 
 
 def valid_service(service):
+    """Check to see if the service is known"""
     if service not in SERVICES:
         raise HandlerException(
             status_code=404,
@@ -61,10 +62,12 @@ def valid_service(service):
 
 
 def compose_key(uid, device_id, service):
+    """Compose the database index key"""
     return "{}:{}:{}".format(service, uid, device_id)
 
 
 def get_max_index(key):
+    """Get the max index from the database"""
     result = index_table.query(
         KeyConditionExpression=Key("fxa_uid").eq(key),
         Select="ALL_ATTRIBUTES",
@@ -76,6 +79,18 @@ def get_max_index(key):
     else:
         return 0
 
+
+def fail(status_code, message):
+    """Generate the failure message"""
+    return dict(
+            headers={"Content-Type": "application/json"},
+            statusCode=status_code,
+            body=json.dumps(dict(
+                status=status_code,
+                message=message
+            )))
+
+
 @log_exceptions
 def store_data(event, context):
     """Store data in S3 and index it in DynamoDB"""
@@ -85,27 +100,13 @@ def store_data(event, context):
     try:
         service = valid_service(event["pathParameters"]["service"])
     except HandlerException as ex:
-        return dict(
-            headers={"Content-Type": "application/json"},
-            statusCode=ex.status_code,
-            body=json.dumps(dict(
-                status=ex.status_code,
-                error=ex.message
-            ))
-        )
+        return fail(ex.status_code, ex.message)
     try:
         key = compose_key(uid=fx_uid, device_id=device_id, service=service)
         req_json = json.loads(event["body"])
         logger.info("data: {}".format(req_json))
     except ValueError as ex:
-        return dict(
-            headers={"Content-Type": "application/json"},
-            statusCode=400,
-            body=json.dumps(dict(
-                status=400,
-                error="Invalid payload: {}".format(ex)
-            ))
-        )
+        return fail(400, "Invalid payload: {}".format(ex))
     ttl = req_json.get("ttl", DEFAULT_TTL)
     s3_filename = device_id + uuid.uuid4().hex
     # "data" is coming from a JSON object, and could be a dict, which will
@@ -149,21 +150,17 @@ def get_data(event, context):
     logger.info("Getting data: {}".format(event))
     device_id = event["pathParameters"]["deviceId"]
     fx_uid = event["pathParameters"]["uid"]
-    limit = event.get("queryStringParameters", {}).get("limit")
-    if limit is None:
-        limit = 10
-    limit = min(10, max(0, limit))
+    # Use "or" here because AWS explicity sets this to "None"
+    limit = (event.get("queryStringParameters") or {}).get("limit")
+    if limit:
+        try:
+            limit = max(1, int(limit))
+        except TypeError:
+            limit = None
     try:
         service = valid_service(event["pathParameters"]["service"])
     except HandlerException as ex:
-        return dict(
-            headers={"Content-Type": "application/json"},
-            statusCode=ex.status_code,
-            body=json.dumps(dict(
-                status=ex.status_code,
-                error="{}".format(ex),
-            ))
-        )
+        return fail(ex.status_code, "{}".format(ex))
     key = compose_key(uid=fx_uid, device_id=device_id, service=service)
     if limit == 0:
         index = get_max_index(key)
@@ -179,27 +176,30 @@ def get_data(event, context):
     key_cond = Key("fxa_uid").eq(key)
     if start_index:
         key_cond = key_cond & Key("index").gt(start_index)
-    results = index_table.query(
+    query_args = dict(
         Select="ALL_ATTRIBUTES",
         KeyConditionExpression=key_cond,
         ConsistentRead=True,
-        Limit=limit,
-    ).get("Items", [])
+    )
+    if limit:
+        query_args["Limit"] = limit
+    results = index_table.query(**query_args).get("Items", [])
     logger.info("results: {}".format(results))
     # Fetch all the payloads
     for item in results:
         try:
-            response = s3.Object(S3_BUCKET, item["s3_filename"]).get()
-            data = response["Body"].read().decode('utf-8')
-            item["data"] = data
+            content = s3.Object(S3_BUCKET, item["s3_filename"]).get()
+            data = content["Body"].read().decode('utf-8')
+            # Attempt to decode the data, just return it if it's not
+            # encoded
+            try:
+                item["data"] = json.loads(data)
+            except ValueError:
+                item["data"] = data
             item["service"] = service
         except ClientError as ex:
             logger.error(ex)
-            return dict(
-                headers={"Content-Type": "application/json"},
-                statusCode=404,
-                body="Content missing or expired"
-            )
+            return fail(404, "Content missing or expired")
     # Serialize the results for delivery
     index = 0
     messages = []
@@ -211,7 +211,10 @@ def get_data(event, context):
     payload = {"last": True, "index": start_index}
     if results:
         # should this be comparing against "scannedCount"?
-        payload["last"] = len(results) < limit
+        if limit:
+            payload["last"] = len(results) < limit
+        else:
+            payload["last"] = True
         payload["index"] = index
         payload["messages"] = messages
     return dict(
@@ -229,14 +232,7 @@ def del_data(event, context=None):
     try:
         service = valid_service(event["pathParameters"]["service"])
     except HandlerException as ex:
-            return dict(
-                headers={"Content-Type": "application/json"},
-                statusCode=ex.status_code,
-                body=json.dumps(dict(
-                    status=ex.status_code,
-                    error="{}".format(ex),
-                ))
-            )
+        return fail(ex.status_code, ex.message)
     key = compose_key(uid=uid, device_id=device_id, service=service)
     items = index_table.query(
         Select="ALL_ATTRIBUTES",
@@ -247,14 +243,7 @@ def del_data(event, context=None):
         for item in items:
             s3.Object(S3_BUCKET, item["s3_filename"]).delete()
     except Exception as ex:
-        return dict(
-            headers={"Content-Type": "application/json"},
-            statusCode=500,
-            body=json.dumps(dict(
-                status=500,
-                error="Could not delete all data {}".format(ex),
-            ))
-        )
+        return fail(500, "Could not delete all data {}".format(ex))
     return dict(
         headers={"Content-Type": "application/json"},
         statusCode=200,
@@ -264,15 +253,20 @@ def del_data(event, context=None):
 
 @log_exceptions
 def status(event, context=None):
+    """Show the current machine status"""
     # Faux status to discover root.
     return dict(
         headers={"Content-Type": "application/json"},
         statusCode=200,
-        body=json.dumps(dict(status=200, message="ok", server=FXA_HOST))
+        body=json.dumps(dict(
+            status=200,
+            message="ok",
+            server=FXA_HOST))
     )
 
 
 def test_index_storage():
+    """Brain dead, positve only unit test."""
     data = {"foo": "bar"}
     store_result = store_data({
         "pathParameters": {
@@ -297,7 +291,7 @@ def test_index_storage():
     body = json.loads(fetch_result['body'])
     assert(body['last'])
     assert(body['index'] == json.loads(store_result['body'])['index'])
-    assert(body['messages'][0]['data'] == json.dumps(data))
+    assert(body['messages'][0]['data'] == data)
 
     index = get_data(
         {
